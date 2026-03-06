@@ -32,4 +32,9 @@ public interface AuditRepository extends JpaRepository<AuditLog, UUID> {
             @Param("startDate") Instant startDate,
             @Param("endDate") Instant endDate,
             Pageable pageable);
+    
+    // Methods for scheduled maintenance tasks
+    long countByCreatedAtBefore(Instant cutoffDate);
+    long countByCreatedAtAfter(Instant startDate);
+    void deleteByCreatedAtBefore(Instant cutoffDate);
 }

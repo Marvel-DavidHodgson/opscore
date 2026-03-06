@@ -1,9 +1,14 @@
 package com.opscore.user;
 
+import com.opscore.exception.BusinessValidationException;
+import com.opscore.exception.ConflictException;
+import com.opscore.exception.ResourceNotFoundException;
 import com.opscore.tenant.Tenant;
 import com.opscore.tenant.TenantRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -21,9 +26,11 @@ public class UserService {
     private final PasswordEncoder passwordEncoder;
 
     @Transactional(readOnly = true)
+    @Cacheable(value = "users", key = "#userId")
     public User getUserById(UUID userId) {
+        log.debug("Fetching user from database: {}", userId);
         return userRepository.findById(userId)
-                .orElseThrow(() -> new RuntimeException("User not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("User", userId));
     }
 
     @Transactional(readOnly = true)
@@ -39,11 +46,11 @@ public class UserService {
     @Transactional
     public User createUser(UUID tenantId, String email, String password, String firstName, String lastName, Role role) {
         if (userRepository.existsByEmailAndTenant_Id(email, tenantId)) {
-            throw new RuntimeException("User with email " + email + " already exists in this tenant");
+            throw new ConflictException("User with email " + email + " already exists in this tenant");
         }
 
         Tenant tenant = tenantRepository.findById(tenantId)
-                .orElseThrow(() -> new RuntimeException("Tenant not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Tenant", tenantId));
 
         User user = User.builder()
                 .tenant(tenant)
@@ -61,6 +68,7 @@ public class UserService {
     }
 
     @Transactional
+    @CacheEvict(value = "users", key = "#userId")
     public User updateUser(UUID userId, String firstName, String lastName, Role role, Boolean isActive) {
         User user = getUserById(userId);
 
@@ -86,6 +94,7 @@ public class UserService {
     }
 
     @Transactional
+    @CacheEvict(value = "users", key = "#userId")
     public void deactivateUser(UUID userId) {
         User user = getUserById(userId);
         user.setIsActive(false);
@@ -98,7 +107,7 @@ public class UserService {
         User user = getUserById(userId);
 
         if (!passwordEncoder.matches(oldPassword, user.getPasswordHash())) {
-            throw new RuntimeException("Old password is incorrect");
+            throw new BusinessValidationException("Old password is incorrect");
         }
 
         user.setPasswordHash(passwordEncoder.encode(newPassword));

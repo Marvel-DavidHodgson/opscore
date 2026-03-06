@@ -4,10 +4,14 @@ import com.opscore.auth.dto.LoginRequest;
 import com.opscore.auth.dto.LoginResponse;
 import com.opscore.auth.dto.RefreshTokenRequest;
 import com.opscore.config.JwtConfig;
+import com.opscore.event.UserLoginEvent;
+import com.opscore.exception.BusinessValidationException;
+import com.opscore.exception.UnauthorizedException;
 import com.opscore.user.User;
 import com.opscore.user.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -25,18 +29,19 @@ public class AuthService {
     private final JwtTokenProvider jwtTokenProvider;
     private final PasswordEncoder passwordEncoder;
     private final JwtConfig jwtConfig;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Transactional
-    public LoginResponse login(LoginRequest request, UUID tenantId) {
+    public LoginResponse login(LoginRequest request, UUID tenantId, String ipAddress, String userAgent) {
         User user = userRepository.findByEmailAndTenant_Id(request.username(), tenantId)
-                .orElseThrow(() -> new RuntimeException("Invalid username or password"));
+                .orElseThrow(() -> new UnauthorizedException("Invalid username or password"));
 
         if (!user.getIsActive()) {
-            throw new RuntimeException("User account is deactivated");
+            throw new BusinessValidationException("User account is deactivated");
         }
 
         if (!passwordEncoder.matches(request.password(), user.getPasswordHash())) {
-            throw new RuntimeException("Invalid username or password");
+            throw new UnauthorizedException("Invalid username or password");
         }
 
         // Update last login
@@ -62,6 +67,10 @@ public class AuthService {
         refreshTokenRepository.save(refreshToken);
 
         log.info("User {} logged in successfully", user.getEmail());
+        
+        // Publish login event for async processing
+        eventPublisher.publishEvent(new UserLoginEvent(this, user.getId(), user.getEmail(),
+                user.getTenant().getId(), ipAddress, userAgent));
 
         return new LoginResponse(
                 accessToken,
@@ -80,16 +89,16 @@ public class AuthService {
     @Transactional
     public LoginResponse refreshAccessToken(RefreshTokenRequest request) {
         RefreshToken refreshToken = refreshTokenRepository.findByToken(request.refreshToken())
-                .orElseThrow(() -> new RuntimeException("Invalid refresh token"));
+                .orElseThrow(() -> new UnauthorizedException("Invalid refresh token"));
 
         if (!refreshToken.isValid()) {
-            throw new RuntimeException("Refresh token is invalid or expired");
+            throw new UnauthorizedException("Refresh token is invalid or expired");
         }
 
         User user = refreshToken.getUser();
 
         if (!user.getIsActive()) {
-            throw new RuntimeException("User account is deactivated");
+            throw new BusinessValidationException("User account is deactivated");
         }
 
         // Generate new access token

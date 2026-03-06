@@ -1,11 +1,17 @@
 package com.opscore.item;
 
+import com.opscore.event.ItemCreatedEvent;
+import com.opscore.event.ItemStatusChangedEvent;
+import com.opscore.exception.ResourceNotFoundException;
 import com.opscore.tenant.Tenant;
 import com.opscore.tenant.TenantRepository;
 import com.opscore.user.User;
 import com.opscore.user.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -22,11 +28,14 @@ public class ItemService {
     private final ItemRepository itemRepository;
     private final TenantRepository tenantRepository;
     private final UserRepository userRepository;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Transactional(readOnly = true)
+    @Cacheable(value = "items", key = "#itemId + ':' + #tenantId")
     public Item getItemById(UUID itemId, UUID tenantId) {
+        log.debug("Fetching item from database: {}", itemId);
         return itemRepository.findByIdAndTenant_Id(itemId, tenantId)
-                .orElseThrow(() -> new RuntimeException("Item not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Item", itemId));
     }
 
     @Transactional(readOnly = true)
@@ -45,15 +54,15 @@ public class ItemService {
     public Item createItem(UUID tenantId, UUID createdByUserId, String title, String description, 
                           String category, UUID assignedToUserId, Map<String, Object> metadata) {
         Tenant tenant = tenantRepository.findById(tenantId)
-                .orElseThrow(() -> new RuntimeException("Tenant not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Tenant", tenantId));
 
         User createdByUser = userRepository.findById(createdByUserId)
-                .orElseThrow(() -> new RuntimeException("Creator user not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("User", createdByUserId));
 
         User assignedToUser = null;
         if (assignedToUserId != null) {
             assignedToUser = userRepository.findById(assignedToUserId)
-                    .orElseThrow(() -> new RuntimeException("Assigned user not found"));
+                    .orElseThrow(() -> new ResourceNotFoundException("User", assignedToUserId));
         }
 
         // Generate item code using tenant slug
@@ -73,10 +82,15 @@ public class ItemService {
 
         Item created = itemRepository.save(item);
         log.info("Item {} created by user {}", created.getCode(), createdByUser.getEmail());
+        
+        // Publish event for async processing
+        eventPublisher.publishEvent(new ItemCreatedEvent(this, created));
+        
         return created;
     }
 
     @Transactional
+    @CacheEvict(value = "items", key = "#itemId + ':' + #tenantId")
     public Item updateItem(UUID itemId, UUID tenantId, String title, String description, 
                           String category, UUID assignedToUserId, Map<String, Object> metadata) {
         Item item = getItemById(itemId, tenantId);
@@ -95,7 +109,7 @@ public class ItemService {
 
         if (assignedToUserId != null) {
             User assignedToUser = userRepository.findById(assignedToUserId)
-                    .orElseThrow(() -> new RuntimeException("Assigned user not found"));
+                    .orElseThrow(() -> new ResourceNotFoundException("User", assignedToUserId));
             item.setAssignedToUser(assignedToUser);
         }
 
@@ -109,6 +123,7 @@ public class ItemService {
     }
 
     @Transactional
+    @CacheEvict(value = "items", key = "#itemId + ':' + #tenantId")
     public void deleteItem(UUID itemId, UUID tenantId) {
         Item item = getItemById(itemId, tenantId);
         itemRepository.delete(item);
@@ -118,9 +133,14 @@ public class ItemService {
     @Transactional
     public Item updateItemStatus(UUID itemId, UUID tenantId, ItemStatus newStatus) {
         Item item = getItemById(itemId, tenantId);
+        ItemStatus oldStatus = item.getStatus();
         item.setStatus(newStatus);
         Item updated = itemRepository.save(item);
         log.info("Item {} status changed to {}", updated.getCode(), newStatus);
+        
+        // Publish event for async processing
+        eventPublisher.publishEvent(new ItemStatusChangedEvent(this, updated, oldStatus));
+        
         return updated;
     }
 
